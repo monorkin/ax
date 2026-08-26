@@ -57,3 +57,7 @@ stored refresh token of the account you're leaving.
 ```bash
 cargo build --release   # → target/release/ax
 ```
+
+## License
+
+MIT — see [LICENSE](LICENSE).

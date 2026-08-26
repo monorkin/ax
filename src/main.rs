@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Parser)]
-#[command(name = "cx", version, about = "Multi-account switcher for Claude Code")]
+#[command(name = "ax", version, about = "Multi-account switcher for Claude Code")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -37,7 +37,7 @@ enum Command {
     AutoSwitch(AutoSwitchArgs),
     /// Run Claude Code as a specific account in this terminal only
     Run(RunArgs),
-    /// Map a directory to an account for `cx run`
+    /// Map a directory to an account for `ax run`
     Map {
         directory: PathBuf,
         /// Account number, email, or alias

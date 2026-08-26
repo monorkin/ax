@@ -1,4 +1,4 @@
-//! `cx auto-switch`: watch the active account's usage and rotate to the
+//! `ax auto-switch`: watch the active account's usage and rotate to the
 //! account with the most quota left before a rate limit hits.
 //!
 //! The decision, once per tick: read the active account's 5-hour and 7-day

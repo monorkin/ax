@@ -64,7 +64,7 @@ impl Roster {
 
     pub fn find(&self, identifier: &str) -> Result<&Account> {
         self.lookup(identifier)
-            .ok_or_else(|| anyhow!("no account matches '{identifier}' — see `cx account list`"))
+            .ok_or_else(|| anyhow!("no account matches '{identifier}' — see `ax account list`"))
     }
 
     pub fn find_mut(&mut self, identifier: &str) -> Result<&mut Account> {
@@ -133,7 +133,7 @@ pub fn read_credentials(account: &Account) -> Result<CredentialsFile> {
     let path = credentials_path(account.number);
     let contents = fs::read_to_string(&path).with_context(|| {
         format!(
-            "no stored credentials for {} — re-add it with `cx account add`",
+            "no stored credentials for {} — re-add it with `ax account add`",
             account.email
         )
     })?;
@@ -158,7 +158,7 @@ pub fn remove_credentials(number: u32) -> Result<()> {
 pub fn read_config(account: &Account) -> Result<serde_json::Value> {
     fsutil::read_json(&config_path(account.number)).with_context(|| {
         format!(
-            "no stored config for {} — re-add it with `cx account add`",
+            "no stored config for {} — re-add it with `ax account add`",
             account.email
         )
     })
@@ -215,7 +215,7 @@ impl StoreLock {
                 return Ok(StoreLock { _file: file });
             }
             if start.elapsed() > Duration::from_secs(10) {
-                bail!("another cx instance holds the store lock — retry in a few seconds");
+                bail!("another ax instance holds the store lock — retry in a few seconds");
             }
             thread::sleep(Duration::from_millis(100));
         }

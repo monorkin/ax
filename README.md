@@ -1,4 +1,4 @@
-# cx
+# ax
 
 Multi-account switcher for Claude Code, in Rust. A simpler, CLI-only take on
 [claude-swap](https://github.com/realiti4/claude-swap): switch between Claude
@@ -8,31 +8,31 @@ run accounts in parallel per terminal or per directory. Linux only.
 ## Usage
 
 ```bash
-cx account add                                  # store the currently logged-in account
-cx account add --token sk-ant-oat01-... \
+ax account add                                  # store the currently logged-in account
+ax account add --token sk-ant-oat01-... \
                --email me@example.com --alias work
-cx account list                                 # all accounts, active one marked *
-cx account alias 2 work                         # alias an account
-cx account remove work                          # remove a stored account
+ax account list                                 # all accounts, active one marked *
+ax account alias 2 work                         # alias an account
+ax account remove work                          # remove a stored account
 
-cx switch work                                  # switch the default login (number, email, or alias)
-cx auto-switch                                  # watch usage, switch before hitting a limit
-cx auto-switch --threshold 80 --once            # single check, for cron
+ax switch work                                  # switch the default login (number, email, or alias)
+ax auto-switch                                  # watch usage, switch before hitting a limit
+ax auto-switch --threshold 80 --once            # single check, for cron
 
-cx run --account work -- --dangerously-skip-permissions
-cx map ./client-app --to work                   # bare `cx run` in that dir launches `work`
-cx mapping list
-cx mapping remove ./client-app
+ax run --account work -- --dangerously-skip-permissions
+ax map ./client-app --to work                   # bare `ax run` in that dir launches `work`
+ax mapping list
+ax mapping remove ./client-app
 ```
 
 To add more accounts: log into Claude Code with the next account and run
-`cx account add` again. Don't `/logout` first — Claude Code may revoke the
+`ax account add` again. Don't `/logout` first — Claude Code may revoke the
 stored refresh token of the account you're leaving.
 
 ## How it works
 
 - `add` snapshots the live login (`~/.claude/.credentials.json` plus the
-  identity in `~/.claude.json`) into `~/.local/share/cx/`.
+  identity in `~/.claude.json`) into `~/.local/share/ax/`.
 - `switch` backs up the outgoing login into its slot, then writes the target's
   credentials and identity. Machine-shared state (MCP server logins, plugin
   secrets) stays live instead of being overwritten by a slot's older snapshot.
@@ -42,7 +42,7 @@ stored refresh token of the account you're leaving.
   `proper-lockfile` directory protocol on `.oauth_refresh.lock`,
   `~/.claude.lock`, and `~/.claude.json.lock`), so a swap never interleaves
   with a token refresh.
-- `run` gives the account its own profile under `~/.local/share/cx/sessions/`
+- `run` gives the account its own profile under `~/.local/share/ax/sessions/`
   and launches `claude` with `CLAUDE_CONFIG_DIR` pointing at it — the default
   login stays untouched. Settings, CLAUDE.md, skills, commands, and agents are
   shared from `~/.claude`; user-scope MCP servers are mirrored on every
@@ -55,5 +55,5 @@ stored refresh token of the account you're leaving.
 ## Building
 
 ```bash
-cargo build --release   # → target/release/cx
+cargo build --release   # → target/release/ax
 ```

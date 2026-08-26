@@ -9,7 +9,7 @@ const TOKEN_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const OAUTH_BETA_HEADER: &str = "oauth-2025-04-20";
-const USER_AGENT: &str = concat!("cx/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("ax/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]

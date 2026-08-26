@@ -1,4 +1,4 @@
-//! Directory → account mappings for `cx run` auto-resolution.
+//! Directory → account mappings for `ax run` auto-resolution.
 //!
 //! Maps a canonical absolute directory path to a stored account identity
 //! (email + organization UUID). Identity is stored as that composite rather

@@ -39,9 +39,9 @@ pub fn default_global_config_path() -> PathBuf {
 
 pub fn data_dir() -> PathBuf {
     if let Some(dir) = env::var_os("XDG_DATA_HOME").filter(|it| !it.is_empty()) {
-        PathBuf::from(dir).join("cx")
+        PathBuf::from(dir).join("ax")
     } else {
-        home().join(".local/share/cx")
+        home().join(".local/share/ax")
     }
 }
 

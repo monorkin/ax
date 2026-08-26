@@ -1,4 +1,4 @@
-//! `cx run`: launch Claude Code as a specific account in this terminal only.
+//! `ax run`: launch Claude Code as a specific account in this terminal only.
 //!
 //! Each account gets its own profile directory under `<data_dir>/sessions/`,
 //! and claude is launched with `CLAUDE_CONFIG_DIR` pointing at it — the
@@ -131,7 +131,7 @@ fn slug(email: &str) -> String {
 
 /// Once claude runs inside the profile it rotates the token family in place,
 /// leaving the store's copy stale. Copying the newer generation back keeps
-/// `cx switch` working with the freshest credentials.
+/// `ax switch` working with the freshest credentials.
 fn sync_newer_profile_credentials_back(account: &Account, profile: &Path) -> Result<()> {
     let path = profile.join(".credentials.json");
     if !path.exists() {

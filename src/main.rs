@@ -10,22 +10,23 @@ mod session;
 mod store;
 
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
+use usage::{Args, Cli, Subcommands};
 
-#[derive(Parser)]
-#[command(name = "ax", version, about = "Multi-account switcher for Claude Code")]
+/// Multi-account switcher for Claude Code
+#[derive(Cli)]
+#[usage(bin = "ax", version, unknown_flags = "error")]
 struct Cli {
-    #[command(subcommand)]
+    #[usage(subcommand)]
     command: Command,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommands)]
 enum Command {
     /// Manage stored accounts
     Account {
-        #[command(subcommand)]
+        #[usage(subcommand)]
         command: AccountCommand,
     },
     /// Switch the default Claude Code login to an account
@@ -41,28 +42,28 @@ enum Command {
     Map {
         directory: PathBuf,
         /// Account number, email, or alias
-        #[arg(long)]
+        #[usage(long)]
         to: String,
     },
     /// Manage directory mappings
     Mapping {
-        #[command(subcommand)]
+        #[usage(subcommand)]
         command: MappingCommand,
     },
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommands)]
 enum AccountCommand {
     /// Store the currently logged-in account, or one from a setup token
     Add {
         /// Register a long-lived setup token instead of the current login
-        #[arg(long)]
+        #[usage(long)]
         token: Option<String>,
         /// Label for a token-registered account
-        #[arg(long, requires = "token")]
+        #[usage(long, requires = "--token")]
         email: Option<String>,
         /// Short alias for the account
-        #[arg(long)]
+        #[usage(long)]
         alias: Option<String>,
     },
     /// List stored accounts
@@ -83,27 +84,27 @@ enum AccountCommand {
 #[derive(Args)]
 struct AutoSwitchArgs {
     /// Switch when the active account's usage reaches this percentage
-    #[arg(long, default_value_t = 90.0)]
+    #[usage(long, default = "90.0")]
     threshold: f64,
     /// Seconds between usage checks
-    #[arg(long, default_value_t = 60)]
+    #[usage(long, default = "60")]
     interval: u64,
     /// Check once and exit instead of looping
-    #[arg(long)]
+    #[usage(long)]
     once: bool,
 }
 
 #[derive(Args)]
 struct RunArgs {
     /// Account number, email, or alias; defaults to the mapping for the current directory
-    #[arg(long)]
+    #[usage(long)]
     account: Option<String>,
     /// Arguments forwarded to claude
-    #[arg(last = true)]
+    #[usage(double_dash = "required")]
     claude_args: Vec<String>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommands)]
 enum MappingCommand {
     /// List directory mappings
     List,

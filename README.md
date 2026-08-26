@@ -5,6 +5,21 @@ Multi-account switcher for Claude Code, in Rust. A simpler, CLI-only take on
 accounts without logging out, let it switch for you before a rate limit, and
 run accounts in parallel per terminal or per directory. Linux only.
 
+## Installing
+
+With [mise](https://mise.jdx.dev):
+
+```bash
+mise use -g github:monorkin/ax                # install it and put ax on your PATH
+mise exec github:monorkin/ax -- ax --help     # or run it once without installing
+```
+
+On [Omarchy](https://omarchy.org):
+
+```bash
+omarchy-mise-install github:monorkin/ax ax
+```
+
 ## Usage
 
 ```bash

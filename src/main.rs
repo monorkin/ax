@@ -1,6 +1,7 @@
 mod account;
 mod auto_switch;
 mod claude;
+mod completions;
 mod fsutil;
 mod locks;
 mod mappings;
@@ -16,7 +17,7 @@ use usage::{Args, Cli, Subcommands};
 
 /// Multi-account switcher for Claude Code
 #[derive(Cli)]
-#[usage(bin = "ax", version, unknown_flags = "error")]
+#[usage(bin = "ax", version, unknown_flags = "error", completion)]
 struct Cli {
     #[usage(subcommand)]
     command: Command,
@@ -49,6 +50,11 @@ enum Command {
     Mapping {
         #[usage(subcommand)]
         command: MappingCommand,
+    },
+    /// Print or install the shell completion script
+    ShellCompletion {
+        #[usage(subcommand)]
+        command: ShellCompletionCommand,
     },
 }
 
@@ -112,6 +118,28 @@ enum MappingCommand {
     Remove { directory: PathBuf },
 }
 
+#[derive(Subcommands)]
+enum ShellCompletionCommand {
+    /// Write the completion script to stdout
+    Print {
+        /// The shell to generate for
+        #[usage(
+            choices("bash", "elvish", "zsh", "fish", "nu", "powershell"),
+            choices_strict = false
+        )]
+        shell: String,
+    },
+    /// Write the completion script where the shell looks for it
+    Install {
+        /// The shell to install for
+        #[usage(
+            choices("bash", "elvish", "zsh", "fish", "nu", "powershell"),
+            choices_strict = false
+        )]
+        shell: String,
+    },
+}
+
 fn main() {
     if let Err(error) = run(Cli::parse()) {
         eprintln!("error: {error:#}");
@@ -138,6 +166,10 @@ fn run(cli: Cli) -> Result<()> {
         Command::Mapping { command } => match command {
             MappingCommand::List => account::list_mappings(),
             MappingCommand::Remove { directory } => account::unmap(&directory),
+        },
+        Command::ShellCompletion { command } => match command {
+            ShellCompletionCommand::Print { shell } => completions::print(&shell),
+            ShellCompletionCommand::Install { shell } => completions::install(&shell),
         },
     }
 }

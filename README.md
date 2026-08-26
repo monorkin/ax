@@ -23,6 +23,9 @@ ax run --account work -- --dangerously-skip-permissions
 ax map ./client-app --to work                   # bare `ax run` in that dir launches `work`
 ax mapping list
 ax mapping remove ./client-app
+
+ax shell-completion install zsh                 # bash, elvish, zsh, fish, nu, or powershell
+ax shell-completion print zsh                   # or write the script yourself
 ```
 
 To add more accounts: log into Claude Code with the next account and run

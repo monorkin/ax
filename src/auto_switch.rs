@@ -39,7 +39,10 @@ pub fn run(threshold: f64, interval: u64, once: bool) -> Result<()> {
     }
 }
 
-fn tick(threshold: f64) -> Result<String> {
+/// One look at the active account's usage, switching if it's time. Returns
+/// what happened in a sentence; `run` prints it, and a program embedding ax
+/// can log it instead.
+pub fn tick(threshold: f64) -> Result<String> {
     let mut roster = Roster::load()?;
     let Some(active_number) = account::active_account_number(&roster)? else {
         return Ok("the current login is not a stored account — nothing to watch".to_string());

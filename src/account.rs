@@ -194,7 +194,7 @@ fn add_from_live_login(alias: Option<String>) -> Result<()> {
                 organization_uuid: identity.organization_uuid,
                 organization_name: identity.organization_name,
                 alias: None,
-                added: crate::timestamp(),
+                added: crate::clock::timestamp(),
             });
             println!("Added account {number}: {}.", identity.email);
             number
@@ -238,7 +238,7 @@ fn add_from_token(token: &str, email: Option<String>, alias: Option<String>) -> 
         organization_uuid: String::new(),
         organization_name: String::new(),
         alias: None,
-        added: crate::timestamp(),
+        added: crate::clock::timestamp(),
     });
     apply_alias(&mut roster, number, alias)?;
     roster.save()?;

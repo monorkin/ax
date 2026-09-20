@@ -41,7 +41,7 @@ pub fn set(directory: &Path, email: &str, organization_uuid: &str) -> Result<Str
         Mapping {
             email: email.to_string(),
             organization_uuid: organization_uuid.to_string(),
-            added: crate::timestamp(),
+            added: crate::clock::timestamp(),
         },
     );
     save(&file)?;

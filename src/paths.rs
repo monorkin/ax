@@ -37,8 +37,12 @@ pub fn default_global_config_path() -> PathBuf {
     }
 }
 
+/// `AX_DATA_DIR` puts the account store somewhere of the caller's choosing,
+/// for a program built on ax that keeps accounts of its own.
 pub fn data_dir() -> PathBuf {
-    if let Some(dir) = env::var_os("XDG_DATA_HOME").filter(|it| !it.is_empty()) {
+    if let Some(dir) = env::var_os("AX_DATA_DIR").filter(|it| !it.is_empty()) {
+        PathBuf::from(dir)
+    } else if let Some(dir) = env::var_os("XDG_DATA_HOME").filter(|it| !it.is_empty()) {
         PathBuf::from(dir).join("ax")
     } else {
         home().join(".local/share/ax")

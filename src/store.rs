@@ -64,7 +64,7 @@ impl Roster {
 
     pub fn find(&self, identifier: &str) -> Result<&Account> {
         self.lookup(identifier)
-            .ok_or_else(|| anyhow!("no account matches '{identifier}' — see `ax account list`"))
+            .ok_or_else(|| anyhow!("no account matches '{identifier}' — see `{} account list`", paths::invoked_as()))
     }
 
     pub fn find_mut(&mut self, identifier: &str) -> Result<&mut Account> {
@@ -133,8 +133,9 @@ pub fn read_credentials(account: &Account) -> Result<CredentialsFile> {
     let path = credentials_path(account.number);
     let contents = fs::read_to_string(&path).with_context(|| {
         format!(
-            "no stored credentials for {} — re-add it with `ax account add`",
-            account.email
+            "no stored credentials for {} — re-add it with `{} account add`",
+            account.email,
+            paths::invoked_as()
         )
     })?;
     serde_json::from_str(&contents).with_context(|| format!("could not parse {}", path.display()))
@@ -158,8 +159,9 @@ pub fn remove_credentials(number: u32) -> Result<()> {
 pub fn read_config(account: &Account) -> Result<serde_json::Value> {
     fsutil::read_json(&config_path(account.number)).with_context(|| {
         format!(
-            "no stored config for {} — re-add it with `ax account add`",
-            account.email
+            "no stored config for {} — re-add it with `{} account add`",
+            account.email,
+            paths::invoked_as()
         )
     })
 }

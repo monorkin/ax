@@ -14,4 +14,5 @@ pub mod mappings;
 pub mod oauth;
 pub mod paths;
 pub mod session;
+pub mod settings;
 pub mod store;

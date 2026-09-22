@@ -26,7 +26,7 @@ pub fn add(token: Option<String>, email: Option<String>, alias: Option<String>) 
 pub fn list() -> Result<()> {
     let roster = Roster::load()?;
     if roster.accounts.is_empty() {
-        println!("No accounts yet — log into Claude Code and run `ax account add`.");
+        println!("No accounts yet — log into Claude Code and run `{} account add`.", paths::invoked_as());
         return Ok(());
     }
 
@@ -118,7 +118,7 @@ pub fn unmap(directory: &Path) -> Result<()> {
 pub fn list_mappings() -> Result<()> {
     let all = mappings::all()?;
     if all.is_empty() {
-        println!("No mappings yet — add one with `ax map ./dir --to <account>`.");
+        println!("No mappings yet — add one with `{} map ./dir --to <account>`.", paths::invoked_as());
         return Ok(());
     }
     for (directory, mapping) in all {

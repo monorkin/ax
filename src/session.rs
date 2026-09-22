@@ -94,7 +94,7 @@ fn run_as(account: &Account, claude_args: &[String]) -> Result<()> {
 }
 
 fn is_current_default_login(account: &Account) -> Result<bool> {
-    if env::var_os("CLAUDE_CONFIG_DIR").is_some() {
+    if paths::claude_config_home_is_chosen() {
         return Ok(false);
     }
     match claude::live_identity()? {

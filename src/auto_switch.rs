@@ -21,7 +21,8 @@ use crate::claude;
 use crate::fsutil;
 use crate::oauth;
 use crate::paths;
-use crate::store::{self, Account, Roster, StoreLock};
+use crate::store::{Account, Roster, StoreLock};
+use crate::usage;
 
 const COOLDOWN_SECONDS: u64 = 300;
 const HYSTERESIS_PERCENT: f64 = 10.0;
@@ -55,6 +56,7 @@ pub fn tick(threshold: f64) -> Result<String> {
     let utilization = usage
         .utilization()
         .context("the usage API returned no windows")?;
+    usage::remember(active.number, usage);
 
     if utilization < threshold {
         return Ok(format!(
@@ -121,21 +123,13 @@ fn best_candidate(
 }
 
 fn headroom_of(candidate: &Account) -> Option<f64> {
-    let credentials = freshened_credentials(candidate)?;
-    match oauth::fetch_usage(&credentials.oauth.access_token) {
-        Ok(usage) => usage.utilization().map(|it| 100.0 - it),
-        Err(error) => {
-            eprintln!("skipping {}: {error:#}", candidate.email);
-            None
+    let looked_up = usage::freshened_credentials(candidate).and_then(|it| oauth::fetch_usage(&it.oauth.access_token));
+    match looked_up {
+        Ok(usage) => {
+            let utilization = usage.utilization();
+            usage::remember(candidate.number, usage);
+            utilization.map(|it| 100.0 - it)
         }
-    }
-}
-
-fn freshened_credentials(candidate: &Account) -> Option<store::CredentialsFile> {
-    let _lock = StoreLock::acquire().ok()?;
-    let mut credentials = store::read_credentials(candidate).ok()?;
-    match account::freshen(candidate, &mut credentials) {
-        Ok(()) => Some(credentials),
         Err(error) => {
             eprintln!("skipping {}: {error:#}", candidate.email);
             None

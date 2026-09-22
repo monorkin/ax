@@ -37,12 +37,23 @@ impl OauthCredentials {
     }
 }
 
+/// How much of an account's allowance is used, per limit, in percent.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Usage {
+    /// The session limit, over five hours.
     pub five_hour: Option<Window>,
+    /// The weekly limit.
     pub seven_day: Option<Window>,
+    /// The weekly limit on Fable, which Claude Code calls "Fable limit" and
+    /// the API `seven_day_overage_included`.
+    #[serde(default)]
+    pub fable: Option<Window>,
 }
 
 impl Usage {
+    /// What switching goes by: the fuller of the session and the week. The
+    /// Fable limit isn't among them — past it Claude Code moves to usage
+    /// credits or another model, not to a stop.
     pub fn utilization(&self) -> Option<f64> {
         [&self.five_hour, &self.seven_day]
             .into_iter()
@@ -52,8 +63,12 @@ impl Usage {
     }
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Window {
     pub utilization: f64,
+    /// When it resets, as the API gives it: an RFC 3339 timestamp.
+    #[serde(default)]
+    pub resets_at: Option<String>,
 }
 
 pub fn refresh(credentials: &mut OauthCredentials) -> Result<()> {
@@ -108,15 +123,21 @@ pub fn fetch_usage(access_token: &str) -> Result<Usage> {
         .context("usage lookup failed")?;
     let body: serde_json::Value = response.body_mut().read_json()?;
 
-    Ok(Usage {
+    Ok(usage_in(&body))
+}
+
+fn usage_in(body: &serde_json::Value) -> Usage {
+    Usage {
         five_hour: parse_window(&body["five_hour"]),
         seven_day: parse_window(&body["seven_day"]),
-    })
+        fable: parse_window(&body["seven_day_overage_included"]),
+    }
 }
 
 fn parse_window(value: &serde_json::Value) -> Option<Window> {
     Some(Window {
         utilization: value["utilization"].as_f64()?,
+        resets_at: value["resets_at"].as_str().map(String::from),
     })
 }
 

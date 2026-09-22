@@ -6,11 +6,13 @@ use std::fs;
 use std::path::Path;
 
 use crate::claude;
+use crate::clock;
 use crate::locks::{ConfigLock, CredentialsLock};
 use crate::mappings;
 use crate::oauth;
 use crate::paths;
 use crate::store::{self, Account, CredentialsFile, Roster, StoreLock};
+use crate::usage;
 
 const FRESHEN_BUFFER_MS: i64 = 10 * 60 * 1000;
 
@@ -30,13 +32,11 @@ pub fn list() -> Result<()> {
         return Ok(());
     }
 
-    let active = active_account_number(&roster)?;
-    for account in &roster.accounts {
-        let marker = if Some(account.number) == active {
-            "*"
-        } else {
-            " "
-        };
+    let bars = usage::Bars::for_stdout();
+    let now = clock::now_seconds();
+    for report in usage::of_every_account()? {
+        let account = &report.account;
+        let marker = if report.active { "*" } else { " " };
         let alias = match &account.alias {
             Some(alias) => format!(" ({alias})"),
             None => String::new(),
@@ -47,6 +47,18 @@ pub fn list() -> Result<()> {
             account.email,
             organization_tag(account)
         );
+        match (&report.reading, &report.failed) {
+            (Some(reading), failed) => {
+                for row in bars.rows(&reading.usage, now) {
+                    println!("     {row}");
+                }
+                if failed.is_some() {
+                    println!("     as of {} ago; the usage endpoint didn't answer just now", clock::span(now - reading.taken_at));
+                }
+            }
+            (None, Some(failed)) => println!("     usage unknown: {failed}"),
+            (None, None) => {}
+        }
     }
     Ok(())
 }

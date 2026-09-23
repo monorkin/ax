@@ -160,7 +160,10 @@ pub struct Bars {
 }
 
 const BAR: char = '━';
-const BAR_EMPTY_UNCOLOURED: char = '─';
+/// What is left is thinner as well as dimmer: on a dark theme a dim colour
+/// and the colour itself are nearly the same line, and then the bar says
+/// nothing.
+const BAR_EMPTY: char = '─';
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
 const RED: &str = "\x1b[31m";
@@ -182,7 +185,7 @@ impl Bars {
             .iter()
             .map(|(name, window)| match window {
                 Some(window) => format!(
-                    "{name:<8} {}  {:>3.0}%{}",
+                    "{name:<8} {}  {:>3.0}% used{}",
                     self.bar(window.utilization),
                     window.utilization,
                     resets(window, now, "  resets in ", "")
@@ -203,9 +206,9 @@ impl Bars {
             } else {
                 GREEN
             };
-            format!("{colour}{}{DIM}{}{PLAIN}", BAR.to_string().repeat(filled), BAR.to_string().repeat(empty))
+            format!("{colour}{}{DIM}{}{PLAIN}", BAR.to_string().repeat(filled), BAR_EMPTY.to_string().repeat(empty))
         } else {
-            format!("{}{}", BAR.to_string().repeat(filled), BAR_EMPTY_UNCOLOURED.to_string().repeat(empty))
+            format!("{}{}", BAR.to_string().repeat(filled), BAR_EMPTY.to_string().repeat(empty))
         }
     }
 }
@@ -232,13 +235,13 @@ mod tests {
     fn a_bar_is_filled_as_far_as_the_limit_is_used() {
         let plain = Bars { coloured: false, width: 10 };
         let rows = plain.rows(&usage(), NOW);
-        assert_eq!(rows[0], "session  ━━━━──────   42%  resets in 3h 12m");
-        assert_eq!(rows[1], "week     ━━━━━━━━━━   95%  resets in 2d 4h");
+        assert_eq!(rows[0], "session  ━━━━──────   42% used  resets in 3h 12m");
+        assert_eq!(rows[1], "week     ━━━━━━━━━━   95% used  resets in 2d 4h");
         assert_eq!(rows[2], "Fable    ──────────     —", "a limit the account doesn't report is shown empty");
 
         let coloured = Bars { coloured: true, width: 10 };
         let rows = coloured.rows(&usage(), NOW);
-        assert!(rows[0].contains(&format!("{GREEN}━━━━{DIM}━━━━━━{PLAIN}")), "one line, the used part in colour");
+        assert!(rows[0].contains(&format!("{GREEN}━━━━{DIM}──────{PLAIN}")), "what is left is a thinner line, not the same one dimmed");
         assert!(rows[1].contains(RED), "past 90% is red");
     }
 

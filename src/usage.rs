@@ -6,6 +6,11 @@
 //! kept, per account, and when asking fails the last one is given instead,
 //! with how old it is. A reading is only ever what the endpoint said; ax
 //! never makes one up.
+//!
+//! Asking is also spaced out here rather than left to the caller: ten
+//! minutes between answers, and a refusal doubles the wait up to an hour.
+//! A caller that asks every minute gets the kept reading in between, which
+//! is what it would have got from a 429 anyway, without the refusal.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -35,8 +40,68 @@ pub struct Report {
     pub active: bool,
     /// The newest reading there is: taken just now, or kept from before.
     pub reading: Option<Reading>,
-    /// Why there is no reading from just now, when there isn't.
+    /// Why the endpoint wasn't asked just now, or what it said when it was
+    /// asked and refused. None when this reading is what it just answered.
     pub failed: Option<String>,
+}
+
+/// Ten minutes between answers, and each refusal doubles the wait to at
+/// most an hour. Five hours of allowance don't move far in ten minutes, and
+/// a program watching for a switch has the last reading to go on meanwhile.
+const SOONEST_AGAIN: i64 = 10 * 60;
+const AT_MOST: i64 = 60 * 60;
+
+/// What is known about one account: the last reading the endpoint gave, and
+/// when it may be asked again.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+struct Known {
+    #[serde(default)]
+    reading: Option<Reading>,
+    /// Seconds since the epoch. Until then the kept reading is the answer.
+    #[serde(default)]
+    ask_again_at: i64,
+    /// The wait that is being kept to, in seconds.
+    #[serde(default)]
+    waiting: i64,
+}
+
+/// What came of wanting one account's usage.
+pub struct Answer {
+    pub reading: Option<Reading>,
+    /// Why what is here isn't from just now, if it isn't.
+    pub failed: Option<String>,
+}
+
+/// One account's usage: asked with `ask`, unless the endpoint was asked
+/// recently or refused, in which case the kept reading stands in. Every
+/// caller goes through here, so no two of them can gang up on the endpoint.
+pub fn answer_for(number: u32, ask: impl FnOnce() -> Result<Usage>) -> Answer {
+    let known = known_of(number);
+    let now = clock::now_seconds();
+    if now < known.ask_again_at {
+        // Nothing went wrong: how old the reading is says the rest
+        return Answer { reading: known.reading, failed: None };
+    }
+
+    match ask() {
+        Ok(usage) => Answer { reading: Some(remember(number, usage)), failed: None },
+        Err(error) => {
+            let asked_too_often = error.downcast_ref::<oauth::AskedTooOften>().is_some();
+            let known = wait_longer(number, known, asked_too_often, now);
+            Answer { reading: known.reading, failed: Some(format!("{error:#}")) }
+        }
+    }
+}
+
+fn wait_longer(number: u32, known: Known, asked_too_often: bool, now: i64) -> Known {
+    let waiting = if asked_too_often {
+        (known.waiting * 2).clamp(SOONEST_AGAIN, AT_MOST)
+    } else {
+        SOONEST_AGAIN
+    };
+    let known = Known { ask_again_at: now + waiting, waiting, ..known };
+    keep(number, &known);
+    known
 }
 
 /// Every stored account, asked now.
@@ -51,28 +116,20 @@ pub fn of_every_account() -> Result<Vec<Report>> {
 }
 
 fn report_on(account: &Account, active: bool) -> Report {
-    match read(account, active) {
-        Ok(reading) => Report { account: account.clone(), active, reading: Some(reading), failed: None },
-        Err(error) => Report {
-            account: account.clone(),
-            active,
-            reading: kept().remove(&account.number.to_string()),
-            failed: Some(format!("{error:#}")),
-        },
-    }
+    let answer = answer_for(account.number, || read(account, active));
+    Report { account: account.clone(), active, reading: answer.reading, failed: answer.failed }
 }
 
 /// The live login's credentials for the account in use — Claude Code
 /// rotates them in place, so the store's copy may be spent — and the
 /// store's, freshened, for the rest.
-fn read(account: &Account, active: bool) -> Result<Reading> {
+fn read(account: &Account, active: bool) -> Result<Usage> {
     let credentials = if active {
         claude::live_credentials()?.context("no live credentials to ask with")?
     } else {
         freshened_credentials(account)?
     };
-    let usage = oauth::fetch_usage(&credentials.oauth.access_token)?;
-    Ok(remember(account.number, usage))
+    oauth::fetch_usage(&credentials.oauth.access_token)
 }
 
 pub(crate) fn freshened_credentials(account: &Account) -> Result<CredentialsFile> {
@@ -82,17 +139,27 @@ pub(crate) fn freshened_credentials(account: &Account) -> Result<CredentialsFile
     Ok(credentials)
 }
 
-/// Keeps a reading the endpoint gave, for when it next says no. Losing it
-/// costs a stale number, so a failure to keep it is not a failure here.
+/// Keeps a reading the endpoint gave, for when it next says no, and sets
+/// when it may be asked again. Losing it costs a stale number, so a failure
+/// to keep it is not a failure here.
 pub fn remember(number: u32, usage: Usage) -> Reading {
-    let reading = Reading { usage, taken_at: clock::now_seconds() };
-    let mut all = kept();
-    all.insert(number.to_string(), reading.clone());
-    let _ = fsutil::write_json_atomically(&kept_path(), &all);
+    let now = clock::now_seconds();
+    let reading = Reading { usage, taken_at: now };
+    keep(number, &Known { reading: Some(reading.clone()), ask_again_at: now + SOONEST_AGAIN, waiting: SOONEST_AGAIN });
     reading
 }
 
-fn kept() -> BTreeMap<String, Reading> {
+fn keep(number: u32, known: &Known) {
+    let mut all = kept();
+    all.insert(number.to_string(), known.clone());
+    let _ = fsutil::write_json_atomically(&kept_path(), &all);
+}
+
+fn known_of(number: u32) -> Known {
+    kept().remove(&number.to_string()).unwrap_or_default()
+}
+
+fn kept() -> BTreeMap<String, Known> {
     fsutil::read_json(&kept_path())
         .ok()
         .and_then(|it| serde_json::from_value(it).ok())
@@ -103,9 +170,15 @@ fn kept_path() -> PathBuf {
     paths::data_dir().join("usage.json")
 }
 
-/// The three limits, as they are shown, in this order.
-pub fn limits_of(usage: &Usage) -> [(&'static str, Option<&Window>); 3] {
-    [("session", usage.five_hour.as_ref()), ("week", usage.seven_day.as_ref()), ("Fable", usage.fable.as_ref())]
+/// The limits, as they are shown, in this order. The model-scoped one is
+/// called whatever the endpoint calls it, and is left out when there is
+/// none: a row of nothing under a name we made up says less than no row.
+pub fn limits_of(usage: &Usage) -> Vec<(&str, Option<&Window>)> {
+    let mut limits = vec![("session", usage.five_hour.as_ref()), ("week", usage.seven_day.as_ref())];
+    if let Some(scoped) = &usage.scoped {
+        limits.push((scoped.name.as_str(), Some(&scoped.window)));
+    }
+    limits
 }
 
 /// Every account in a few lines of plain text, for a person or a model
@@ -126,8 +199,11 @@ pub fn described(reports: &[Report], now: i64) -> String {
                     })
                     .collect();
                 line.push_str(&limits.join(", "));
-                if report.failed.is_some() {
-                    line.push_str(&format!("; as of {} ago, the endpoint didn't answer just now", clock::span(now - reading.taken_at)));
+                if let Some(how_old) = aged(reading, now) {
+                    line.push_str(&format!("; as of {how_old} ago"));
+                }
+                if let Some(failed) = &report.failed {
+                    line.push_str(&format!("; the endpoint didn't answer just now: {failed}"));
                 }
             }
             None => line.push_str(&format!("unknown; {}", report.failed.as_deref().unwrap_or("no reading"))),
@@ -135,6 +211,17 @@ pub fn described(reports: &[Report], now: i64) -> String {
         lines.push(line);
     }
     lines.join("\n")
+}
+
+/// How old a reading is, when it is old enough to say so. A reading taken
+/// within the minute is now.
+pub fn aged(reading: &Reading, now: i64) -> Option<String> {
+    let seconds = now - reading.taken_at;
+    if seconds >= 60 {
+        Some(clock::span(seconds))
+    } else {
+        None
+    }
 }
 
 fn name_of(account: &Account) -> &str {
@@ -227,8 +314,26 @@ mod tests {
         Usage {
             five_hour: window(42.0, Some("2026-09-22T19:32:00+00:00")),
             seven_day: window(95.0, Some("2026-09-24T20:20:00Z")),
-            fable: None,
+            scoped: Some(crate::oauth::Scoped {
+                name: "Fable".to_string(),
+                window: window(7.0, Some("2026-09-24T20:20:00Z")).unwrap(),
+            }),
         }
+    }
+
+    #[test]
+    fn a_refusal_doubles_the_wait_and_a_good_answer_sets_it_back() {
+        let refused_once = wait_longer(0, Known::default(), true, NOW);
+        assert_eq!(refused_once.waiting, SOONEST_AGAIN, "the first refusal waits the usual ten minutes");
+        assert_eq!(refused_once.ask_again_at, NOW + SOONEST_AGAIN);
+
+        let refused_again = wait_longer(0, refused_once, true, NOW);
+        assert_eq!(refused_again.waiting, 2 * SOONEST_AGAIN);
+        let refused_for_hours = (0..10).fold(refused_again, |known, _| wait_longer(0, known, true, NOW));
+        assert_eq!(refused_for_hours.waiting, AT_MOST, "and never longer than an hour");
+
+        let broken = wait_longer(0, refused_for_hours, false, NOW);
+        assert_eq!(broken.waiting, SOONEST_AGAIN, "something else going wrong isn't asking too often");
     }
 
     #[test]
@@ -237,7 +342,10 @@ mod tests {
         let rows = plain.rows(&usage(), NOW);
         assert_eq!(rows[0], "session  ━━━━──────   42% used  resets in 3h 12m");
         assert_eq!(rows[1], "week     ━━━━━━━━━━   95% used  resets in 2d 4h");
-        assert_eq!(rows[2], "Fable    ──────────     —", "a limit the account doesn't report is shown empty");
+        assert_eq!(rows[2], "Fable    ━─────────    7% used  resets in 2d 4h", "the model-scoped limit, under the name the endpoint gave it");
+
+        let without_a_scoped_limit = Usage { scoped: None, ..usage() };
+        assert_eq!(plain.rows(&without_a_scoped_limit, NOW).len(), 2, "no row for a limit the account doesn't have");
 
         let coloured = Bars { coloured: true, width: 10 };
         let rows = coloured.rows(&usage(), NOW);
@@ -269,8 +377,8 @@ mod tests {
 
         assert_eq!(
             described(&reports, NOW),
-            "anna@example.com (work), in use: session 42% (resets in 3h 12m), week 95% (resets in 2d 4h), Fable not reported\n\
-             anna2@example.com (37signals): session 42% (resets in 3h 12m), week 95% (resets in 2d 4h), Fable not reported; as of 12m ago, the endpoint didn't answer just now\n\
+            "anna@example.com (work), in use: session 42% (resets in 3h 12m), week 95% (resets in 2d 4h), Fable 7% (resets in 2d 4h)\n\
+             anna2@example.com (37signals): session 42% (resets in 3h 12m), week 95% (resets in 2d 4h), Fable 7% (resets in 2d 4h); as of 12m ago; the endpoint didn't answer just now: http status: 429\n\
              anna3@example.com (37signals): unknown; http status: 429"
         );
     }

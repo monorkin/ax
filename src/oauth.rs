@@ -44,10 +44,18 @@ pub struct Usage {
     pub five_hour: Option<Window>,
     /// The weekly limit.
     pub seven_day: Option<Window>,
-    /// The weekly limit on Fable, which Claude Code calls "Fable limit" and
-    /// the API `seven_day_overage_included`.
+    /// A weekly limit that applies to one model only — "Fable" today —
+    /// named as the endpoint names it, because which model it is has
+    /// changed before and will again.
     #[serde(default)]
-    pub fable: Option<Window>,
+    pub scoped: Option<Scoped>,
+}
+
+/// A limit that covers one model rather than everything.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Scoped {
+    pub name: String,
+    pub window: Window,
 }
 
 impl Usage {
@@ -114,24 +122,71 @@ fn apply_refresh_response(
     Ok(())
 }
 
+/// The endpoint's answer when it has been asked too often. Nothing is wrong
+/// with the account or the token; the answer is to wait longer.
+#[derive(Debug)]
+pub struct AskedTooOften;
+
+impl std::fmt::Display for AskedTooOften {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "the usage endpoint is being asked too often")
+    }
+}
+
+impl std::error::Error for AskedTooOften {}
+
 pub fn fetch_usage(access_token: &str) -> Result<Usage> {
-    let mut response = ureq::get(USAGE_URL)
+    let answered = ureq::get(USAGE_URL)
         .header("Authorization", &format!("Bearer {access_token}"))
         .header("anthropic-beta", OAUTH_BETA_HEADER)
         .header("User-Agent", USER_AGENT)
-        .call()
-        .context("usage lookup failed")?;
+        .call();
+
+    let mut response = match answered {
+        Err(ureq::Error::StatusCode(429)) => return Err(AskedTooOften.into()),
+        answered => answered.context("usage lookup failed")?,
+    };
     let body: serde_json::Value = response.body_mut().read_json()?;
 
     Ok(usage_in(&body))
 }
 
+/// `limits` is what the endpoint says about itself: each limit with the
+/// kind it is, what it covers and how full it is, and it is where a limit on
+/// one model is named. The windows beside it — `five_hour`, `seven_day` —
+/// are the older shape, and answer for an account that has no `limits`.
 fn usage_in(body: &serde_json::Value) -> Usage {
-    Usage {
-        five_hour: parse_window(&body["five_hour"]),
-        seven_day: parse_window(&body["seven_day"]),
-        fable: parse_window(&body["seven_day_overage_included"]),
+    match body["limits"].as_array() {
+        Some(limits) => Usage {
+            five_hour: limit_window(limits, "session"),
+            seven_day: limit_window(limits, "weekly_all"),
+            scoped: scoped_limit(limits),
+        },
+        None => Usage {
+            five_hour: parse_window(&body["five_hour"]),
+            seven_day: parse_window(&body["seven_day"]),
+            scoped: parse_window(&body["seven_day_overage_included"])
+                .map(|window| Scoped { name: "Fable".to_string(), window }),
+        },
     }
+}
+
+fn limit_of<'a>(limits: &'a [serde_json::Value], kind: &str) -> Option<&'a serde_json::Value> {
+    limits.iter().find(|it| it["kind"].as_str() == Some(kind))
+}
+
+fn limit_window(limits: &[serde_json::Value], kind: &str) -> Option<Window> {
+    let limit = limit_of(limits, kind)?;
+    Some(Window {
+        utilization: limit["percent"].as_f64()?,
+        resets_at: limit["resets_at"].as_str().map(String::from),
+    })
+}
+
+fn scoped_limit(limits: &[serde_json::Value]) -> Option<Scoped> {
+    let limit = limit_of(limits, "weekly_scoped")?;
+    let name = limit["scope"]["model"]["display_name"].as_str().unwrap_or("scoped").to_string();
+    Some(Scoped { name, window: limit_window(limits, "weekly_scoped")? })
 }
 
 fn parse_window(value: &serde_json::Value) -> Option<Window> {
@@ -160,4 +215,52 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("system clock is before the Unix epoch")
         .as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shape the endpoint answers with, cut down to what is read here.
+    #[test]
+    fn every_limit_comes_from_what_the_endpoint_says_it_has() {
+        let body = json!({
+            "five_hour": { "utilization": 19.0, "resets_at": "2026-09-23T09:50:00Z" },
+            "seven_day": { "utilization": 41.0, "resets_at": "2026-09-26T21:00:00Z" },
+            "seven_day_opus": null,
+            "limits": [
+                { "kind": "session", "group": "session", "percent": 19, "resets_at": "2026-09-23T09:50:00Z", "scope": null },
+                { "kind": "weekly_all", "group": "weekly", "percent": 41, "resets_at": "2026-09-26T21:00:00Z", "scope": null },
+                {
+                    "kind": "weekly_scoped", "group": "weekly", "percent": 20, "resets_at": "2026-09-26T21:00:00Z",
+                    "scope": { "model": { "id": null, "display_name": "Fable" }, "surface": null }
+                }
+            ]
+        });
+
+        let usage = usage_in(&body);
+        assert_eq!(usage.five_hour.unwrap().utilization, 19.0);
+        assert_eq!(usage.seven_day.unwrap().utilization, 41.0);
+        let scoped = usage.scoped.expect("the limit on one model is read from limits, where it is named");
+        assert_eq!(scoped.name, "Fable");
+        assert_eq!(scoped.window.utilization, 20.0);
+        assert_eq!(scoped.window.resets_at.as_deref(), Some("2026-09-26T21:00:00Z"));
+    }
+
+    #[test]
+    fn an_account_without_a_limits_list_is_read_the_way_it_was_before() {
+        let body = json!({
+            "five_hour": { "utilization": 19.0, "resets_at": "2026-09-23T09:50:00Z" },
+            "seven_day": { "utilization": 41.0 },
+            "seven_day_overage_included": { "utilization": 3.0 },
+        });
+
+        let usage = usage_in(&body);
+        assert_eq!(usage.five_hour.unwrap().utilization, 19.0);
+        assert_eq!(usage.seven_day.unwrap().resets_at, None);
+        let scoped = usage.scoped.unwrap();
+        assert_eq!((scoped.name.as_str(), scoped.window.utilization), ("Fable", 3.0));
+
+        assert!(usage_in(&json!({ "limits": [] })).five_hour.is_none(), "a list with nothing in it reports nothing");
+    }
 }

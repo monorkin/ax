@@ -50,13 +50,20 @@ pub fn tick(threshold: f64) -> Result<String> {
     };
     let active = roster.find(&active_number.to_string())?.clone();
 
-    let credentials =
-        claude::live_credentials()?.context("no live credentials to check usage with")?;
-    let usage = oauth::fetch_usage(&credentials.oauth.access_token)?;
-    let utilization = usage
+    // Through usage, so this and everything else that asks keep to one
+    // pace: a watch that runs every minute doesn't earn a 429 here
+    let answer = usage::answer_for(active.number, || {
+        let credentials = claude::live_credentials()?.context("no live credentials to check usage with")?;
+        oauth::fetch_usage(&credentials.oauth.access_token)
+    });
+    let Some(reading) = answer.reading else {
+        let why = answer.failed.unwrap_or_else(|| "no reading yet".to_string());
+        return Ok(format!("nothing to go on — staying put ({why})"));
+    };
+    let utilization = reading
+        .usage
         .utilization()
         .context("the usage API returned no windows")?;
-    usage::remember(active.number, usage);
 
     if utilization < threshold {
         return Ok(format!(

@@ -52,8 +52,11 @@ pub fn list() -> Result<()> {
                 for row in bars.rows(&reading.usage, now) {
                     println!("     {row}");
                 }
-                if failed.is_some() {
-                    println!("     as of {} ago; the usage endpoint didn't answer just now", clock::span(now - reading.taken_at));
+                match (usage::aged(reading, now), failed) {
+                    (Some(how_old), None) => println!("     as of {how_old} ago"),
+                    (Some(how_old), Some(failed)) => println!("     as of {how_old} ago; the endpoint didn't answer just now: {failed}"),
+                    (None, Some(failed)) => println!("     the endpoint didn't answer just now: {failed}"),
+                    (None, None) => {}
                 }
             }
             (None, Some(failed)) => println!("     usage unknown: {failed}"),

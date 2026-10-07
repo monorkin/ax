@@ -44,9 +44,54 @@ pub fn run(threshold: f64, interval: u64, once: bool) -> Result<()> {
 /// what happened in a sentence; `run` prints it, and a program embedding ax
 /// can log it instead.
 pub fn tick(threshold: f64) -> Result<String> {
-    let mut roster = Roster::load()?;
+    match decide(threshold)? {
+        Decision::Stay(why) => Ok(why),
+        Decision::Switch(switch) => switch.carry_out(),
+    }
+}
+
+/// What a tick would do, without doing it yet: a program embedding ax can
+/// wind down what runs on the active account before it carries out a switch.
+pub enum Decision {
+    Stay(String),
+    Switch(Box<Switch>),
+}
+
+pub struct Switch {
+    from: Account,
+    to: Account,
+    utilization: f64,
+    headroom: f64,
+}
+
+impl Switch {
+    pub fn to(&self) -> &str {
+        &self.to.email
+    }
+
+    pub fn from(&self) -> &str {
+        &self.from.email
+    }
+
+    /// The roster is read again: a wind-down takes minutes, and whatever
+    /// changed meanwhile is kept.
+    pub fn carry_out(self) -> Result<String> {
+        let _lock = StoreLock::acquire()?;
+        let mut roster = Roster::load()?;
+        let target = roster.find(&self.to.number.to_string())?.clone();
+        account::switch_to(&mut roster, &target)?;
+        record_switch()?;
+        Ok(format!(
+            "{} hit {:.0}% — switched to {} ({:.0}% headroom)",
+            self.from.email, self.utilization, self.to.email, self.headroom
+        ))
+    }
+}
+
+pub fn decide(threshold: f64) -> Result<Decision> {
+    let roster = Roster::load()?;
     let Some(active_number) = account::active_account_number(&roster)? else {
-        return Ok("the current login is not a stored account — nothing to watch".to_string());
+        return Ok(Decision::Stay("the current login is not a stored account — nothing to watch".to_string()));
     };
     let active = roster.find(&active_number.to_string())?.clone();
 
@@ -58,7 +103,7 @@ pub fn tick(threshold: f64) -> Result<String> {
     });
     let Some(reading) = answer.reading else {
         let why = answer.failed.unwrap_or_else(|| "no reading yet".to_string());
-        return Ok(format!("nothing to go on — staying put ({why})"));
+        return Ok(Decision::Stay(format!("nothing to go on — staying put ({why})")));
     };
     let utilization = reading
         .usage
@@ -66,35 +111,27 @@ pub fn tick(threshold: f64) -> Result<String> {
         .context("the usage API returned no windows")?;
 
     if utilization < threshold {
-        return Ok(format!(
+        return Ok(Decision::Stay(format!(
             "{} is at {utilization:.0}% — staying put",
             active.email
-        ));
+        )));
     }
 
     let fully_spent = utilization >= 100.0;
     if !fully_spent && within_cooldown()? {
-        return Ok(format!(
+        return Ok(Decision::Stay(format!(
             "{} is at {utilization:.0}%, but a switch just happened — waiting out the cooldown",
             active.email
-        ));
+        )));
     }
 
     let headroom = 100.0 - utilization;
     match best_candidate(&roster, &active, threshold, headroom, fully_spent)? {
-        Some((target, target_headroom)) => {
-            let _lock = StoreLock::acquire()?;
-            account::switch_to(&mut roster, &target)?;
-            record_switch()?;
-            Ok(format!(
-                "{} hit {utilization:.0}% — switched to {} ({target_headroom:.0}% headroom)",
-                active.email, target.email
-            ))
-        }
-        None => Ok(format!(
+        Some((to, headroom)) => Ok(Decision::Switch(Box::new(Switch { from: active, to, utilization, headroom }))),
+        None => Ok(Decision::Stay(format!(
             "{} is at {utilization:.0}%, but no other account has meaningfully more headroom",
             active.email
-        )),
+        ))),
     }
 }
 

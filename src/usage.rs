@@ -12,19 +12,20 @@
 //! A caller that asks every minute gets the kept reading in between, which
 //! is what it would have got from a 429 anyway, without the refusal.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 
 use crate::account;
-use crate::claude;
 use crate::clock;
+use crate::codex;
 use crate::fsutil;
+use crate::login::{self, Login};
 use crate::oauth::{self, Usage, Window};
 use crate::paths;
-use crate::store::{self, Account, CredentialsFile, Roster, StoreLock};
+use crate::store::{self, Account, CredentialsFile, Provider, Roster, StoreLock};
 
 /// What the endpoint said about one account, and when.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -36,7 +37,7 @@ pub struct Reading {
 
 pub struct Report {
     pub account: Account,
-    /// The account Claude Code is logged in as right now.
+    /// The account its tool's default login is on right now.
     pub active: bool,
     /// The newest reading there is: taken just now, or kept from before.
     pub reading: Option<Reading>,
@@ -107,36 +108,52 @@ fn wait_longer(number: u32, known: Known, asked_too_often: bool, now: i64) -> Kn
 /// Every stored account, asked now.
 pub fn of_every_account() -> Result<Vec<Report>> {
     let roster = Roster::load()?;
-    let active = account::active_account_number(&roster)?;
+    let mut active = Vec::new();
+    for provider in Provider::ALL {
+        if let Some(live) = Login::default_of(provider).live_account(&roster)? {
+            active.push(live.number);
+        }
+    }
     Ok(roster
         .accounts
         .iter()
-        .map(|it| report_on(it, Some(it.number) == active))
+        .map(|it| report_on(it, active.contains(&it.number), &roster))
         .collect())
 }
 
-fn report_on(account: &Account, active: bool) -> Report {
-    let answer = answer_for(account.number, || read(account, active));
+fn report_on(account: &Account, active: bool, roster: &Roster) -> Report {
+    let answer = answer_for(account.number, || read(account, roster));
     Report { account: account.clone(), active, reading: answer.reading, failed: answer.failed }
 }
 
-/// The live login's credentials for the account in use — Claude Code
-/// rotates them in place, so the store's copy may be spent — and the
-/// store's, freshened, for the rest.
-fn read(account: &Account, active: bool) -> Result<Usage> {
-    let credentials = if active {
-        claude::live_credentials()?.context("no live credentials to ask with")?
-    } else {
-        freshened_credentials(account)?
-    };
-    oauth::fetch_usage(&credentials.oauth.access_token)
+/// An account's usage, asked now. A login the account is live in holds the
+/// only good copy of its tokens, and refreshing a stored copy would log that
+/// login out, so it's asked with what the login has.
+pub(crate) fn read(account: &Account, roster: &Roster) -> Result<Usage> {
+    if let Some(live) = login::where_live(account, roster)? {
+        return live.usage();
+    }
+
+    match account.provider {
+        Provider::Claude => oauth::fetch_usage(&freshened_credentials(account)?.oauth.access_token),
+        Provider::Codex => codex::fetch_usage(&freshened_codex_auth(account)?),
+    }
 }
 
 pub(crate) fn freshened_credentials(account: &Account) -> Result<CredentialsFile> {
     let _lock = StoreLock::acquire()?;
+    login::take_back_newest(account, &Roster::load()?)?;
     let mut credentials = store::read_credentials(account)?;
     account::freshen(account, &mut credentials)?;
     Ok(credentials)
+}
+
+fn freshened_codex_auth(account: &Account) -> Result<serde_json::Value> {
+    let _lock = StoreLock::acquire()?;
+    login::take_back_newest(account, &Roster::load()?)?;
+    let mut auth = store::read_codex_auth(account)?;
+    login::freshen_codex(account, &mut auth)?;
+    Ok(auth)
 }
 
 /// Keeps a reading the endpoint gave, for when it next says no, and sets
@@ -357,6 +374,7 @@ mod tests {
     fn every_account_is_described_in_a_line_with_how_old_its_numbers_are() {
         let account = |number: u32, email: &str, alias: Option<&str>| Account {
             number,
+            provider: Provider::Claude,
             email: email.to_string(),
             uuid: String::new(),
             organization_uuid: String::new(),

@@ -1,6 +1,6 @@
 //! Directory → account mappings for `ax run` auto-resolution.
 //!
-//! Maps a canonical absolute directory path to a stored account identity
+//! Maps a canonical absolute directory path, per tool, to a stored account identity
 //! (email + organization UUID). Identity is stored as that composite rather
 //! than the account number, since numbers are reused when accounts are
 //! removed and re-added. Persisted to `<data_dir>/mappings.json`.
@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::fsutil;
 use crate::paths;
+use crate::store::Provider;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct Mapping {
@@ -26,17 +27,36 @@ pub struct Mapping {
 struct MappingsFile {
     #[serde(rename = "schemaVersion")]
     schema_version: u32,
+    /// Claude Code's, under the name they had before there were other tools.
     mappings: BTreeMap<String, Mapping>,
+    #[serde(default, rename = "codexMappings", skip_serializing_if = "BTreeMap::is_empty")]
+    codex_mappings: BTreeMap<String, Mapping>,
 }
 
-pub fn all() -> Result<BTreeMap<String, Mapping>> {
-    Ok(load()?.mappings)
+impl MappingsFile {
+    fn of(&self, provider: Provider) -> &BTreeMap<String, Mapping> {
+        match provider {
+            Provider::Claude => &self.mappings,
+            Provider::Codex => &self.codex_mappings,
+        }
+    }
+
+    fn of_mut(&mut self, provider: Provider) -> &mut BTreeMap<String, Mapping> {
+        match provider {
+            Provider::Claude => &mut self.mappings,
+            Provider::Codex => &mut self.codex_mappings,
+        }
+    }
 }
 
-pub fn set(directory: &Path, email: &str, organization_uuid: &str) -> Result<String> {
+pub fn all(provider: Provider) -> Result<BTreeMap<String, Mapping>> {
+    Ok(load()?.of(provider).clone())
+}
+
+pub fn set(directory: &Path, provider: Provider, email: &str, organization_uuid: &str) -> Result<String> {
     let key = normalize(directory)?;
     let mut file = load()?;
-    file.mappings.insert(
+    file.of_mut(provider).insert(
         key.clone(),
         Mapping {
             email: email.to_string(),
@@ -48,10 +68,10 @@ pub fn set(directory: &Path, email: &str, organization_uuid: &str) -> Result<Str
     Ok(key)
 }
 
-pub fn remove(directory: &Path) -> Result<bool> {
+pub fn remove(directory: &Path, provider: Provider) -> Result<bool> {
     let key = normalize(directory)?;
     let mut file = load()?;
-    if file.mappings.remove(&key).is_none() {
+    if file.of_mut(provider).remove(&key).is_none() {
         Ok(false)
     } else {
         save(&file)?;
@@ -59,9 +79,11 @@ pub fn remove(directory: &Path) -> Result<bool> {
     }
 }
 
-pub fn resolve(directory: &Path) -> Result<Option<Mapping>> {
+/// Each tool goes by its own deepest mapping, so a subdirectory can change
+/// one tool's account and inherit the other's.
+pub fn resolve(directory: &Path, provider: Provider) -> Result<Option<Mapping>> {
     let target = normalize(directory)?;
-    let deepest_mapped_ancestor = all()?
+    let deepest_mapped_ancestor = all(provider)?
         .into_iter()
         .filter(|(mapped, _)| covers(mapped, &target))
         .max_by_key(|(mapped, _)| mapped.len())
@@ -94,6 +116,7 @@ fn load() -> Result<MappingsFile> {
         Ok(MappingsFile {
             schema_version: 1,
             mappings: BTreeMap::new(),
+            codex_mappings: BTreeMap::new(),
         })
     }
 }

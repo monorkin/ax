@@ -4,6 +4,7 @@
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
@@ -20,12 +21,36 @@ use crate::paths;
 pub struct Roster {
     pub active_account_number: Option<u32>,
     pub accounts: Vec<Account>,
+    /// Each pool's name and the numbers of the accounts in it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pools: BTreeMap<String, Vec<u32>>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    #[default]
+    Claude,
+    Codex,
+}
+
+impl Provider {
+    pub const ALL: [Provider; 2] = [Provider::Claude, Provider::Codex];
+
+    pub fn program(self) -> &'static str {
+        match self {
+            Provider::Claude => "claude",
+            Provider::Codex => "codex",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Account {
     pub number: u32,
+    #[serde(default)]
+    pub provider: Provider,
     pub email: String,
     #[serde(default)]
     pub uuid: String,
@@ -86,6 +111,22 @@ impl Roster {
         self.accounts.iter().map(|it| it.number).max().unwrap_or(0) + 1
     }
 
+    pub fn pool(&self, name: &str) -> Result<&[u32]> {
+        self.pools
+            .get(name)
+            .map(Vec::as_slice)
+            .ok_or_else(|| anyhow!("no pool named '{name}' — see `{} pool list`", paths::invoked_as()))
+    }
+
+    pub fn members_of(&self, pool: &str, provider: Provider) -> Result<Vec<&Account>> {
+        let numbers = self.pool(pool)?;
+        Ok(self
+            .accounts
+            .iter()
+            .filter(|it| it.provider == provider && numbers.contains(&it.number))
+            .collect())
+    }
+
     pub fn ensure_alias_is_free(&self, alias: &str, owner: u32) -> Result<()> {
         let taken = self
             .accounts
@@ -133,7 +174,7 @@ pub fn read_credentials(account: &Account) -> Result<CredentialsFile> {
     let path = credentials_path(account.number);
     let contents = fs::read_to_string(&path).with_context(|| {
         format!(
-            "no stored credentials for {} — re-add it with `{} account add`",
+            "no stored credentials for {} — re-add it with `{} account add claude`",
             account.email,
             paths::invoked_as()
         )
@@ -159,11 +200,25 @@ pub fn remove_credentials(number: u32) -> Result<()> {
 pub fn read_config(account: &Account) -> Result<serde_json::Value> {
     fsutil::read_json(&config_path(account.number)).with_context(|| {
         format!(
-            "no stored config for {} — re-add it with `{} account add`",
+            "no stored config for {} — re-add it with `{} account add claude`",
             account.email,
             paths::invoked_as()
         )
     })
+}
+
+pub fn read_codex_auth(account: &Account) -> Result<serde_json::Value> {
+    fsutil::read_json(&credentials_path(account.number)).with_context(|| {
+        format!(
+            "no stored credentials for {} — re-add it with `{} account add codex`",
+            account.email,
+            paths::invoked_as()
+        )
+    })
+}
+
+pub fn write_codex_auth(number: u32, auth: &serde_json::Value) -> Result<()> {
+    write_protected(&credentials_path(number), &serde_json::to_string_pretty(auth)?)
 }
 
 pub fn write_config(number: u32, contents: &str) -> Result<()> {

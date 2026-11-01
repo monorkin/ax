@@ -64,7 +64,7 @@ pub fn timestamp() -> String {
     format_epoch_seconds(seconds)
 }
 
-fn format_epoch_seconds(seconds: u64) -> String {
+pub fn format_epoch_seconds(seconds: u64) -> String {
     let days_since_epoch = seconds / 86_400;
     let (year, month, day) = civil_date(days_since_epoch);
     let hour = seconds / 3600 % 24;

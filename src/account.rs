@@ -7,11 +7,12 @@ use std::path::Path;
 
 use crate::claude;
 use crate::clock;
-use crate::locks::{ConfigLock, CredentialsLock};
+use crate::codex;
+use crate::login::{self, Login};
 use crate::mappings;
 use crate::oauth;
 use crate::paths;
-use crate::store::{self, Account, CredentialsFile, Roster, StoreLock};
+use crate::store::{self, Account, CredentialsFile, Provider, Roster, StoreLock};
 use crate::usage;
 
 const FRESHEN_BUFFER_MS: i64 = 10 * 60 * 1000;
@@ -25,10 +26,46 @@ pub fn add(token: Option<String>, email: Option<String>, alias: Option<String>) 
     }
 }
 
+pub fn add_codex(alias: Option<String>) -> Result<()> {
+    let _lock = StoreLock::acquire()?;
+    let home = codex::Home::current();
+    let auth = home.auth()?.context("no Codex login found — log in with `codex login` first")?;
+    let identity = home
+        .identity()?
+        .context("the Codex login has no ChatGPT tokens — API key logins have no accounts to switch between")?;
+
+    let mut roster = Roster::load()?;
+    let number = match roster.find_by_identity(&identity.email, &identity.account_id) {
+        Some(existing) => {
+            println!("Updating stored credentials for {}.", existing.email);
+            existing.number
+        }
+        None => {
+            let number = roster.next_number();
+            roster.accounts.push(Account {
+                number,
+                provider: Provider::Codex,
+                email: identity.email.clone(),
+                uuid: identity.user_id,
+                organization_uuid: identity.account_id,
+                organization_name: format!("ChatGPT {}", identity.plan),
+                alias: None,
+                added: clock::timestamp(),
+            });
+            println!("Added account {number}: {}.", identity.email);
+            number
+        }
+    };
+
+    store::write_codex_auth(number, &auth)?;
+    apply_alias(&mut roster, number, alias)?;
+    roster.save()
+}
+
 pub fn list() -> Result<()> {
     let roster = Roster::load()?;
     if roster.accounts.is_empty() {
-        println!("No accounts yet — log into Claude Code and run `{} account add`.", paths::invoked_as());
+        println!("No accounts yet — log into Claude Code and run `{} account add claude`, or into Codex and run `account add codex`.", paths::invoked_as());
         return Ok(());
     }
 
@@ -86,6 +123,8 @@ pub fn remove(identifier: &str) -> Result<()> {
     store::remove_credentials(account.number)?;
     store::remove_config(account.number)?;
     roster.accounts.retain(|it| it.number != account.number);
+    roster.pools.values_mut().for_each(|members| members.retain(|it| *it != account.number));
+    roster.pools.retain(|_, members| !members.is_empty());
     if roster.active_account_number == Some(account.number) {
         roster.active_account_number = None;
     }
@@ -100,15 +139,14 @@ pub fn switch(identifier: &str) -> Result<()> {
     let mut roster = Roster::load()?;
     let target = roster.find(identifier)?.clone();
 
-    if let Some(live) = claude::live_identity()?
-        && live.email == target.email
-        && live.organization_uuid == target.organization_uuid
-    {
+    let default_login = Login::default_of(target.provider);
+    if default_login.live_account(&roster)?.is_some_and(|it| it.number == target.number) {
         println!("Already on {}.", target.email);
         return Ok(());
     }
 
-    switch_to(&mut roster, &target)?;
+    login::warn_if_live_elsewhere(&target, &roster, &default_login)?;
+    default_login.switch_to(&mut roster, &target)?;
     println!("Switched to {}.", target.email);
     Ok(())
 }
@@ -116,13 +154,19 @@ pub fn switch(identifier: &str) -> Result<()> {
 pub fn map(directory: &Path, identifier: &str) -> Result<()> {
     let roster = Roster::load()?;
     let account = roster.find(identifier)?;
-    let key = mappings::set(directory, &account.email, &account.organization_uuid)?;
-    println!("Mapped {key} to {}.", account.email);
+    let key = mappings::set(directory, account.provider, &account.email, &account.organization_uuid)?;
+    println!("Mapped {key} to {} for {}.", account.email, account.provider.program());
     Ok(())
 }
 
-pub fn unmap(directory: &Path) -> Result<()> {
-    if mappings::remove(directory)? {
+pub fn unmap(directory: &Path, tool: Option<Provider>) -> Result<()> {
+    let mut removed = false;
+    for provider in Provider::ALL {
+        if tool.is_none_or(|it| it == provider) {
+            removed |= mappings::remove(directory, provider)?;
+        }
+    }
+    if removed {
         println!("Mapping removed.");
     } else {
         println!("No mapping for that directory.");
@@ -131,36 +175,23 @@ pub fn unmap(directory: &Path) -> Result<()> {
 }
 
 pub fn list_mappings() -> Result<()> {
-    let all = mappings::all()?;
-    if all.is_empty() {
-        println!("No mappings yet — add one with `{} map ./dir --to <account>`.", paths::invoked_as());
-        return Ok(());
+    let mut any = false;
+    for provider in Provider::ALL {
+        for (directory, mapping) in mappings::all(provider)? {
+            any = true;
+            println!("{directory} → {} [{}]", mapping.email, provider.program());
+        }
     }
-    for (directory, mapping) in all {
-        println!("{directory} → {}", mapping.email);
+    if !any {
+        println!("No mappings yet — add one with `{} map ./dir --to <account>`.", paths::invoked_as());
     }
     Ok(())
 }
 
 /// Switch the default Claude Code login to `target`. The caller holds the
-/// store lock; this takes Claude Code's own credential and config locks, backs
-/// up the outgoing login into its slot, then writes the target's credentials
-/// and identity. Any needed token freshening happens before the locks — never
-/// hold them across the network.
+/// store lock.
 pub fn switch_to(roster: &mut Roster, target: &Account) -> Result<()> {
-    let mut credentials = store::read_credentials(target)?;
-    let config = store::read_config(target)?;
-    freshen(target, &mut credentials)?;
-
-    let _credentials_lock = CredentialsLock::acquire()?;
-    let _config_lock = ConfigLock::acquire()?;
-
-    back_up_outgoing_login(roster)?;
-    claude::activate_credentials(&credentials)?;
-    claude::splice_oauth_account(&config)?;
-
-    roster.active_account_number = Some(target.number);
-    roster.save()
+    Login::default_of(Provider::Claude).switch_to(roster, target)
 }
 
 pub fn active_account_number(roster: &Roster) -> Result<Option<u32>> {
@@ -204,6 +235,7 @@ fn add_from_live_login(alias: Option<String>) -> Result<()> {
             let number = roster.next_number();
             roster.accounts.push(Account {
                 number,
+                provider: Provider::Claude,
                 email: identity.email.clone(),
                 uuid: identity.uuid,
                 organization_uuid: identity.organization_uuid,
@@ -248,6 +280,7 @@ fn add_from_token(token: &str, email: Option<String>, alias: Option<String>) -> 
     store::write_config(number, &serde_json::to_string_pretty(&config)?)?;
     roster.accounts.push(Account {
         number,
+        provider: Provider::Claude,
         email: email.clone(),
         uuid: String::new(),
         organization_uuid: String::new(),
@@ -269,28 +302,6 @@ fn apply_alias(roster: &mut Roster, number: u32, alias: Option<String>) -> Resul
         roster.find_mut(&number.to_string())?.alias = Some(alias);
     }
     Ok(())
-}
-
-fn back_up_outgoing_login(roster: &Roster) -> Result<()> {
-    let Some(identity) = claude::live_identity()? else {
-        return Ok(());
-    };
-    let Some(outgoing) = roster.find_by_identity(&identity.email, &identity.organization_uuid)
-    else {
-        return Ok(());
-    };
-    let Some(credentials) = claude::live_credentials()? else {
-        return Ok(());
-    };
-    if credentials.oauth.access_token.is_empty() {
-        return Ok(());
-    }
-
-    store::write_credentials(outgoing.number, &credentials)?;
-    store::write_config(
-        outgoing.number,
-        &fs::read_to_string(paths::global_config_path())?,
-    )
 }
 
 fn organization_tag(account: &Account) -> &str {

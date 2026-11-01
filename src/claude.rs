@@ -5,6 +5,7 @@
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use crate::fsutil;
 use crate::paths;
@@ -32,70 +33,106 @@ pub struct Identity {
 }
 
 pub fn live_identity() -> Result<Option<Identity>> {
-    let path = paths::global_config_path();
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let config = fsutil::read_json(&path)?;
-    let account = &config["oauthAccount"];
-    match account["emailAddress"].as_str().filter(|it| !it.is_empty()) {
-        Some(email) => Ok(Some(Identity {
-            email: email.to_string(),
-            uuid: string_at(account, "accountUuid"),
-            organization_uuid: string_at(account, "organizationUuid"),
-            organization_name: string_at(account, "organizationName"),
-        })),
-        None => Ok(None),
-    }
+    Home::current().identity()
 }
 
 pub fn live_credentials() -> Result<Option<CredentialsFile>> {
-    let path = paths::credentials_path();
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let contents = fs::read_to_string(&path)?;
-    if contents.trim().is_empty() {
-        return Ok(None);
-    }
-    let credentials = serde_json::from_str(&contents)
-        .with_context(|| format!("could not parse {}", path.display()))?;
-    Ok(Some(credentials))
+    Home::current().credentials()
 }
 
 pub fn activate_credentials(stored: &CredentialsFile) -> Result<()> {
-    let mut activated = stored.clone();
-    if let Some(live) = live_credentials()? {
-        carry_over_machine_shared_keys(&mut activated, &live);
-    }
-    write_credentials(&activated)
+    Home::current().activate_credentials(stored)
 }
 
 pub fn write_credentials(credentials: &CredentialsFile) -> Result<()> {
-    fsutil::write_atomically(
-        &paths::credentials_path(),
-        &serde_json::to_string_pretty(credentials)?,
-    )
+    Home::current().write_credentials(credentials)
 }
 
 pub fn splice_oauth_account(stored_config: &Value) -> Result<()> {
-    let oauth_account = stored_config
-        .get("oauthAccount")
-        .context("stored config carries no oauthAccount")?;
+    Home::current().splice_oauth_account(stored_config)
+}
 
-    let path = paths::global_config_path();
-    if path.exists() {
-        let mut config =
-            fsutil::read_json(&path).context("refusing to rewrite an unreadable ~/.claude.json")?;
-        if !config.is_object() {
-            bail!("{} is not a JSON object", path.display());
+/// Where one Claude Code login lives: the current one, or a pool's.
+pub struct Home {
+    pub config_home: PathBuf,
+    pub global_config: PathBuf,
+}
+
+impl Home {
+    pub fn current() -> Home {
+        Home { config_home: paths::claude_config_home(), global_config: paths::global_config_path() }
+    }
+
+    pub fn at(directory: &Path) -> Home {
+        Home { config_home: directory.to_path_buf(), global_config: directory.join(".claude.json") }
+    }
+
+    pub fn identity(&self) -> Result<Option<Identity>> {
+        if !self.global_config.exists() {
+            return Ok(None);
         }
-        config["oauthAccount"] = oauth_account.clone();
-        fsutil::write_atomically(&path, &serde_json::to_string_pretty(&config)?)
-    } else {
-        fsutil::write_atomically(&path, &serde_json::to_string_pretty(stored_config)?)
+
+        let config = fsutil::read_json(&self.global_config)?;
+        let account = &config["oauthAccount"];
+        match account["emailAddress"].as_str().filter(|it| !it.is_empty()) {
+            Some(email) => Ok(Some(Identity {
+                email: email.to_string(),
+                uuid: string_at(account, "accountUuid"),
+                organization_uuid: string_at(account, "organizationUuid"),
+                organization_name: string_at(account, "organizationName"),
+            })),
+            None => Ok(None),
+        }
+    }
+
+    pub fn credentials(&self) -> Result<Option<CredentialsFile>> {
+        let path = self.credentials_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let contents = fs::read_to_string(&path)?;
+        if contents.trim().is_empty() {
+            return Ok(None);
+        }
+        let credentials = serde_json::from_str(&contents)
+            .with_context(|| format!("could not parse {}", path.display()))?;
+        Ok(Some(credentials))
+    }
+
+    pub fn activate_credentials(&self, stored: &CredentialsFile) -> Result<()> {
+        let mut activated = stored.clone();
+        if let Some(live) = self.credentials()? {
+            carry_over_machine_shared_keys(&mut activated, &live);
+        }
+        self.write_credentials(&activated)
+    }
+
+    pub fn write_credentials(&self, credentials: &CredentialsFile) -> Result<()> {
+        fsutil::write_atomically(&self.credentials_path(), &serde_json::to_string_pretty(credentials)?)
+    }
+
+    pub fn splice_oauth_account(&self, stored_config: &Value) -> Result<()> {
+        let oauth_account = stored_config
+            .get("oauthAccount")
+            .context("stored config carries no oauthAccount")?;
+
+        let path = &self.global_config;
+        if path.exists() {
+            let mut config =
+                fsutil::read_json(path).context("refusing to rewrite an unreadable ~/.claude.json")?;
+            if !config.is_object() {
+                bail!("{} is not a JSON object", path.display());
+            }
+            config["oauthAccount"] = oauth_account.clone();
+            fsutil::write_atomically(path, &serde_json::to_string_pretty(&config)?)
+        } else {
+            fsutil::write_atomically(path, &serde_json::to_string_pretty(stored_config)?)
+        }
+    }
+
+    fn credentials_path(&self) -> PathBuf {
+        self.config_home.join(".credentials.json")
     }
 }
 

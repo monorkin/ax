@@ -8,6 +8,11 @@
 //! beats it by a hysteresis margin, so two accounts hovering at the line
 //! never ping-pong. A cooldown (persisted, so separate runs share it) spaces
 //! proactive switches out; a fully spent account bypasses it.
+//!
+//! Each login is decided on its own: Claude Code's and Codex's default logins,
+//! or a pool's, which rotates only among the pool's members. An account live
+//! in another login is never a candidate, since two copies of a refresh token
+//! log each other out.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -16,21 +21,31 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::account;
-use crate::claude;
 use crate::fsutil;
-use crate::oauth;
+use crate::login::{self, Login};
 use crate::paths;
-use crate::store::{Account, Roster, StoreLock};
+use crate::store::{Account, Provider, Roster, StoreLock};
 use crate::usage;
 
 const COOLDOWN_SECONDS: u64 = 300;
 const HYSTERESIS_PERCENT: f64 = 10.0;
 
 pub fn run(threshold: f64, interval: u64, once: bool) -> Result<()> {
+    watch(threshold, interval, once, None)
+}
+
+pub fn watch(threshold: f64, interval: u64, once: bool, pool: Option<&str>) -> Result<()> {
     loop {
-        match tick(threshold) {
-            Ok(outcome) => println!("{outcome}"),
+        match scopes_for(pool) {
+            Ok(scopes) => {
+                for scope in &scopes {
+                    match tick_in(threshold, scope) {
+                        Ok(outcome) => println!("{outcome}"),
+                        Err(error) => eprintln!("check failed: {error:#}"),
+                    }
+                }
+            }
+            Err(error) if pool.is_some() => return Err(error),
             Err(error) => eprintln!("check failed: {error:#}"),
         }
         if once {
@@ -40,14 +55,55 @@ pub fn run(threshold: f64, interval: u64, once: bool) -> Result<()> {
     }
 }
 
-/// One look at the active account's usage, switching if it's time. Returns
-/// what happened in a sentence; `run` prints it, and a program embedding ax
-/// can log it instead.
+/// One look at the active Claude Code account's usage, switching if it's
+/// time. Returns what happened in a sentence; a program embedding ax can log
+/// it.
 pub fn tick(threshold: f64) -> Result<String> {
-    match decide(threshold)? {
+    tick_in(threshold, &Scope::default_login(Provider::Claude))
+}
+
+pub fn tick_in(threshold: f64, scope: &Scope) -> Result<String> {
+    match decide_in(threshold, scope)? {
         Decision::Stay(why) => Ok(why),
         Decision::Switch(switch) => switch.carry_out(),
     }
+}
+
+/// A login to watch, and the pool it may rotate within, if it's kept to one.
+pub struct Scope {
+    login: Login,
+    pool: Option<String>,
+}
+
+impl Scope {
+    pub fn default_login(provider: Provider) -> Scope {
+        Scope { login: Login::default_of(provider), pool: None }
+    }
+
+    pub fn of_pool(pool: &str, provider: Provider) -> Scope {
+        Scope { login: Login::of_pool(pool, provider), pool: Some(pool.to_string()) }
+    }
+}
+
+/// Claude Code's default login always; the others only for what's stored.
+fn scopes_for(pool: Option<&str>) -> Result<Vec<Scope>> {
+    let roster = Roster::load()?;
+    let mut scopes = Vec::new();
+    for provider in Provider::ALL {
+        match pool {
+            Some(pool) => {
+                if !roster.members_of(pool, provider)?.is_empty() {
+                    scopes.push(Scope::of_pool(pool, provider));
+                }
+            }
+            None => {
+                if provider == Provider::Claude || roster.accounts.iter().any(|it| it.provider == provider) {
+                    scopes.push(Scope::default_login(provider));
+                }
+            }
+        }
+    }
+    Ok(scopes)
 }
 
 /// What a tick would do, without doing it yet: a program embedding ax can
@@ -58,6 +114,7 @@ pub enum Decision {
 }
 
 pub struct Switch {
+    login: Login,
     from: Account,
     to: Account,
     utilization: f64,
@@ -79,8 +136,8 @@ impl Switch {
         let _lock = StoreLock::acquire()?;
         let mut roster = Roster::load()?;
         let target = roster.find(&self.to.number.to_string())?.clone();
-        account::switch_to(&mut roster, &target)?;
-        record_switch()?;
+        self.login.switch_to(&mut roster, &target)?;
+        record_switch(&self.login)?;
         Ok(format!(
             "{} hit {:.0}% — switched to {} ({:.0}% headroom)",
             self.from.email, self.utilization, self.to.email, self.headroom
@@ -89,18 +146,21 @@ impl Switch {
 }
 
 pub fn decide(threshold: f64) -> Result<Decision> {
+    decide_in(threshold, &Scope::default_login(Provider::Claude))
+}
+
+pub fn decide_in(threshold: f64, scope: &Scope) -> Result<Decision> {
     let roster = Roster::load()?;
-    let Some(active_number) = account::active_account_number(&roster)? else {
-        return Ok(Decision::Stay("the current login is not a stored account — nothing to watch".to_string()));
+    let Some(active) = scope.login.live_account(&roster)? else {
+        return Ok(Decision::Stay(match &scope.pool {
+            Some(pool) => format!("pool {pool} has no {} login yet — start one with `{} run --pool {pool}`", scope.login.provider.program(), paths::invoked_as()),
+            None => "the current login is not a stored account — nothing to watch".to_string(),
+        }));
     };
-    let active = roster.find(&active_number.to_string())?.clone();
 
     // Through usage, so this and everything else that asks keep to one
     // pace: a watch that runs every minute doesn't earn a 429 here
-    let answer = usage::answer_for(active.number, || {
-        let credentials = claude::live_credentials()?.context("no live credentials to check usage with")?;
-        oauth::fetch_usage(&credentials.oauth.access_token)
-    });
+    let answer = usage::answer_for(active.number, || scope.login.usage());
     let Some(reading) = answer.reading else {
         let why = answer.failed.unwrap_or_else(|| "no reading yet".to_string());
         return Ok(Decision::Stay(format!("nothing to go on — staying put ({why})")));
@@ -118,7 +178,7 @@ pub fn decide(threshold: f64) -> Result<Decision> {
     }
 
     let fully_spent = utilization >= 100.0;
-    if !fully_spent && within_cooldown()? {
+    if !fully_spent && within_cooldown(&scope.login)? {
         return Ok(Decision::Stay(format!(
             "{} is at {utilization:.0}%, but a switch just happened — waiting out the cooldown",
             active.email
@@ -126,8 +186,14 @@ pub fn decide(threshold: f64) -> Result<Decision> {
     }
 
     let headroom = 100.0 - utilization;
-    match best_candidate(&roster, &active, threshold, headroom, fully_spent)? {
-        Some((to, headroom)) => Ok(Decision::Switch(Box::new(Switch { from: active, to, utilization, headroom }))),
+    match best_candidate(&roster, scope, &active, threshold, headroom, fully_spent)? {
+        Some((to, headroom)) => Ok(Decision::Switch(Box::new(Switch {
+            login: scope.login.clone(),
+            from: active,
+            to,
+            utilization,
+            headroom,
+        }))),
         None => Ok(Decision::Stay(format!(
             "{} is at {utilization:.0}%, but no other account has meaningfully more headroom",
             active.email
@@ -135,19 +201,43 @@ pub fn decide(threshold: f64) -> Result<Decision> {
     }
 }
 
+/// For a pool login nobody has used yet: the member with the most left that
+/// isn't live anywhere else.
+pub fn emptiest_member(pool: &str, provider: Provider) -> Result<Option<Account>> {
+    let roster = Roster::load()?;
+    let login = Login::of_pool(pool, provider);
+    let mut best: Option<(Account, f64)> = None;
+    for member in roster.members_of(pool, provider)? {
+        if login::live_elsewhere(member, &roster, &login)? {
+            continue;
+        }
+        let headroom = headroom_of(member, &roster).unwrap_or(-1.0);
+        if best.as_ref().is_none_or(|(_, best_headroom)| headroom > *best_headroom) {
+            best = Some((member.clone(), headroom));
+        }
+    }
+    Ok(best.map(|(member, _)| member))
+}
+
 fn best_candidate(
     roster: &Roster,
+    scope: &Scope,
     active: &Account,
     threshold: f64,
     active_headroom: f64,
     active_fully_spent: bool,
 ) -> Result<Option<(Account, f64)>> {
+    let candidates: Vec<&Account> = match &scope.pool {
+        Some(pool) => roster.members_of(pool, scope.login.provider)?,
+        None => roster.accounts.iter().filter(|it| it.provider == scope.login.provider).collect(),
+    };
+
     let mut best: Option<(Account, f64)> = None;
-    for candidate in &roster.accounts {
-        if candidate.number == active.number {
+    for candidate in candidates {
+        if candidate.number == active.number || login::live_elsewhere(candidate, roster, &scope.login)? {
             continue;
         }
-        let Some(headroom) = headroom_of(candidate) else {
+        let Some(headroom) = headroom_of(candidate, roster) else {
             continue;
         };
         if headroom <= 0.0 || 100.0 - headroom >= threshold {
@@ -166,19 +256,12 @@ fn best_candidate(
     Ok(best)
 }
 
-fn headroom_of(candidate: &Account) -> Option<f64> {
-    let looked_up = usage::freshened_credentials(candidate).and_then(|it| oauth::fetch_usage(&it.oauth.access_token));
-    match looked_up {
-        Ok(usage) => {
-            let utilization = usage.utilization();
-            usage::remember(candidate.number, usage);
-            utilization.map(|it| 100.0 - it)
-        }
-        Err(error) => {
-            eprintln!("skipping {}: {error:#}", candidate.email);
-            None
-        }
+fn headroom_of(candidate: &Account, roster: &Roster) -> Option<f64> {
+    let answer = usage::answer_for(candidate.number, || usage::read(candidate, roster));
+    if let Some(failed) = &answer.failed {
+        eprintln!("{}: {failed}", candidate.email);
     }
+    answer.reading.and_then(|it| it.usage.utilization()).map(|it| 100.0 - it)
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -187,21 +270,21 @@ struct State {
     last_switch_at: u64,
 }
 
-fn within_cooldown() -> Result<bool> {
-    Ok(now() - load_state()?.last_switch_at < COOLDOWN_SECONDS)
+fn within_cooldown(login: &Login) -> Result<bool> {
+    Ok(now() - load_state(login)?.last_switch_at < COOLDOWN_SECONDS)
 }
 
-fn record_switch() -> Result<()> {
+fn record_switch(login: &Login) -> Result<()> {
     fsutil::write_json_atomically(
-        &state_path(),
+        &state_path(login),
         &State {
             last_switch_at: now(),
         },
     )
 }
 
-fn load_state() -> Result<State> {
-    let path = state_path();
+fn load_state(login: &Login) -> Result<State> {
+    let path = state_path(login);
     if path.exists() {
         let contents = fs::read_to_string(&path)?;
         Ok(serde_json::from_str(&contents).unwrap_or_default())
@@ -210,8 +293,12 @@ fn load_state() -> Result<State> {
     }
 }
 
-fn state_path() -> PathBuf {
-    paths::data_dir().join("auto_switch_state.json")
+fn state_path(login: &Login) -> PathBuf {
+    match &login.directory {
+        Some(directory) => directory.with_extension("auto_switch_state.json"),
+        None if login.provider == Provider::Claude => paths::data_dir().join("auto_switch_state.json"),
+        None => paths::data_dir().join(format!("auto_switch_state-{}.json", login.provider.program())),
+    }
 }
 
 fn now() -> u64 {

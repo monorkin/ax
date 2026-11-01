@@ -34,8 +34,12 @@ pub struct CredentialsLock {
 
 impl CredentialsLock {
     pub fn acquire() -> Result<CredentialsLock> {
-        let primary = DirectoryLock::acquire(oauth_refresh_lock_dir(), CREDENTIALS_STALENESS)?;
-        let legacy = DirectoryLock::acquire(legacy_credentials_lock_dir(), CREDENTIALS_STALENESS)?;
+        Self::acquire_in(&paths::claude_config_home())
+    }
+
+    pub fn acquire_in(config_home: &Path) -> Result<CredentialsLock> {
+        let primary = DirectoryLock::acquire(config_home.join(".oauth_refresh.lock"), CREDENTIALS_STALENESS)?;
+        let legacy = DirectoryLock::acquire(sibling_lock_of(config_home), CREDENTIALS_STALENESS)?;
         Ok(CredentialsLock {
             _primary: primary,
             _legacy: legacy,
@@ -49,29 +53,17 @@ pub struct ConfigLock {
 
 impl ConfigLock {
     pub fn acquire() -> Result<ConfigLock> {
-        let lock = DirectoryLock::acquire(config_lock_dir(), CONFIG_STALENESS)?;
+        Self::acquire_for(&paths::global_config_path())
+    }
+
+    pub fn acquire_for(global_config: &Path) -> Result<ConfigLock> {
+        let lock = DirectoryLock::acquire(sibling_lock_of(global_config), CONFIG_STALENESS)?;
         Ok(ConfigLock { _lock: lock })
     }
 }
 
-fn oauth_refresh_lock_dir() -> PathBuf {
-    paths::claude_config_home().join(".oauth_refresh.lock")
-}
-
-fn legacy_credentials_lock_dir() -> PathBuf {
-    let home = paths::claude_config_home();
-    home.with_file_name(format!(
-        "{}.lock",
-        home.file_name().unwrap().to_string_lossy()
-    ))
-}
-
-fn config_lock_dir() -> PathBuf {
-    let config = paths::global_config_path();
-    config.with_file_name(format!(
-        "{}.lock",
-        config.file_name().unwrap().to_string_lossy()
-    ))
+fn sibling_lock_of(path: &Path) -> PathBuf {
+    path.with_file_name(format!("{}.lock", path.file_name().unwrap().to_string_lossy()))
 }
 
 struct DirectoryLock {
